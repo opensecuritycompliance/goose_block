@@ -337,6 +337,7 @@ impl CliSession {
             envs: Envs::new(HashMap::new()),
             env_keys: Vec::new(),
             headers: HashMap::new(),
+            allowed_headers: Vec::new(),
             description: goose::config::DEFAULT_EXTENSION_DESCRIPTION.to_string(),
             timeout: Some(timeout),
             bundled: None,

@@ -54,6 +54,7 @@ pub trait McpClientTrait: Send + Sync {
         arguments: Option<JsonObject>,
         working_dir: Option<&str>,
         cancel_token: CancellationToken,
+        allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error>;
 
     fn get_info(&self) -> Option<&InitializeResult>;
@@ -520,7 +521,7 @@ impl McpClientTrait for McpClient {
                 ClientRequest::ListResourcesRequest(ListResourcesRequest {
                     params: Some(PaginatedRequestParams { meta: None, cursor }),
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -548,7 +549,7 @@ impl McpClientTrait for McpClient {
                         uri: uri.to_string(),
                     },
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -573,7 +574,7 @@ impl McpClientTrait for McpClient {
                 ClientRequest::ListToolsRequest(ListToolsRequest {
                     params: Some(PaginatedRequestParams { meta: None, cursor }),
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -592,7 +593,9 @@ impl McpClientTrait for McpClient {
         arguments: Option<JsonObject>,
         working_dir: Option<&str>,
         cancel_token: CancellationToken,
+        allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
+        let extensions = inject_session_into_extensions(Default::default(), allowed_headers).await;
         let request = ClientRequest::CallToolRequest(CallToolRequest {
             params: CallToolRequestParams {
                 meta: None,
@@ -601,7 +604,7 @@ impl McpClientTrait for McpClient {
                 arguments,
             },
             method: Default::default(),
-            extensions: Default::default(),
+            extensions,
         });
 
         let result = self
@@ -627,7 +630,7 @@ impl McpClientTrait for McpClient {
                 ClientRequest::ListPromptsRequest(ListPromptsRequest {
                     params: Some(PaginatedRequestParams { meta: None, cursor }),
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -661,7 +664,7 @@ impl McpClientTrait for McpClient {
                         arguments,
                     },
                     method: Default::default(),
-                    extensions: Default::default(),
+                    extensions: inject_session_into_extensions(Default::default(), None).await,
                 }),
                 cancel_token,
             )
@@ -714,6 +717,53 @@ fn inject_session_context_into_extensions(
     }
 
     extensions.insert(Meta(meta_map));
+    extensions
+}
+
+/// Injects dynamic headers from session into extensions, filtered by allowed_headers.
+async fn inject_session_into_extensions(
+    mut extensions: rmcp::model::Extensions,
+    allowed_headers: Option<Vec<String>>,
+) -> rmcp::model::Extensions {
+    use rmcp::model::Meta;
+
+    let session_id_opt = crate::session_context::current_session_id();
+
+    if let Some(session_id) = session_id_opt {
+        let mut meta_map = extensions
+            .get::<Meta>()
+            .map(|meta| meta.0.clone())
+            .unwrap_or_default();
+
+        // JsonObject is case-sensitive, so we use retain for case-insensitive removal
+        meta_map.retain(|k, _| !k.eq_ignore_ascii_case(SESSION_ID_HEADER));
+
+        meta_map.insert(SESSION_ID_HEADER.to_string(), Value::String(session_id.clone()));
+
+        // Inject dynamic headers from session if available
+        if let Ok(session) = crate::session::SessionManager::instance().get_session(&session_id, false).await {
+            if let Some(headers_value) = session.extension_data.get_extension_state("websocket_headers", "v0") {
+                if let Some(headers_obj) = headers_value.as_object() {
+                    let mut headers_map = serde_json::Map::new();
+                    for (key, value) in headers_obj {
+                        // Filter by allowed_headers if provided
+                        if let Some(ref allowed) = allowed_headers {
+                            if !allowed.is_empty() && !allowed.contains(key) {
+                                continue;
+                            }
+                        }
+                        headers_map.insert(key.clone(), value.clone());
+                    }
+                    if !headers_map.is_empty() {
+                        meta_map.insert("websocket_headers".to_string(), Value::Object(headers_map));
+                    }
+                }
+            }
+        }
+
+        extensions.insert(Meta(meta_map));
+    }
+
     extensions
 }
 
@@ -972,7 +1022,7 @@ mod tests {
         });
         "empty removes"
     )]
-    fn test_session_id_case_insensitive_replacement(
+    async fn test_session_id_case_insensitive_replacement(
         session_id: Option<&str>,
         expected_meta: serde_json::Value,
     ) {

@@ -296,6 +296,7 @@ impl McpClientTrait for ChatRecallClient {
         arguments: Option<JsonObject>,
         _working_dir: Option<&str>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let content = match name {
             "chatrecall" => self.handle_chatrecall(session_id, arguments).await,

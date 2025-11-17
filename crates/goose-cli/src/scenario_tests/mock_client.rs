@@ -100,6 +100,7 @@ impl McpClientTrait for MockClient {
         arguments: Option<serde_json::Map<String, Value>>,
         _working_dir: Option<&str>,
         _cancel_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         if let Some(handler) = self.handlers.get(name) {
             match handler(&Value::Object(arguments.unwrap_or_default())) {
