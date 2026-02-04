@@ -247,7 +247,8 @@ pub async fn handle_web(
     let agent = create_agent(&provider_name, &model).await?;
 
     let ws_token = if auth_token.is_none() {
-        uuid::Uuid::new_v4().to_string()
+        // uuid::Uuid::new_v4().to_string()
+        String::new() // Disable WS token for now
     } else {
         String::new()
     };
@@ -476,6 +477,20 @@ async fn handle_socket(
                         }) => {
                             eprintln!("[WEBSOCKET] Parsed message - session_id: {}, has_json_headers: {}", 
                                 session_id, _json_headers.is_some());
+
+                            // Ensure session exists
+                            if goose::session::SessionManager::instance().get_session(&session_id, false).await.is_err() {
+                                eprintln!("[WEBSOCKET] Session {} not found, creating new session", session_id);
+                                let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+                                if let Err(e) = goose::session::SessionManager::instance().create_session_with_id(
+                                    &session_id,
+                                    cwd,
+                                    "Web Session".to_string(),
+                                    goose::session::SessionType::User
+                                ).await {
+                                    error!("Failed to auto-create session {}: {}", session_id, e);
+                                }
+                            }
                             
                             // Get headers from HTTP upgrade request (preferred) or from JSON message (fallback)
                             let headers_to_store = {

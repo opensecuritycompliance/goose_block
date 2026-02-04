@@ -220,7 +220,7 @@ fn create_anthropic_request(
     messages: &[Message],
     tools: &[Tool],
 ) -> Result<Value> {
-    let mut request = anthropic::create_request(model_config, system, messages, tools)?;
+    let mut request = anthropic::create_request(model_config, system, messages, tools, None)?;
 
     let obj = request
         .as_object_mut()

@@ -14,6 +14,7 @@ use super::errors::ProviderError;
 use super::formats::anthropic::{
     create_request, response_to_streaming_message, thinking_type, ThinkingType,
 };
+use serde_json::json;
 use super::openai_compatible::handle_status_openai_compat;
 use super::openai_compatible::map_http_error_to_provider_error;
 use super::retry::ProviderRetry;
@@ -143,6 +144,85 @@ impl AnthropicProvider {
 
         headers
     }
+
+    async fn post(
+        &self,
+        session_id: Option<&str>,
+        payload: &Value,
+    ) -> Result<ApiResponse, ProviderError> {
+        let mut request = self.api_client.request(session_id, "v1/messages");
+
+        for (key, value) in self.get_conditional_headers() {
+            request = request.header(key, value)?;
+        }
+
+        if let Some(custom_headers) = &self.custom_headers {
+            for (key, value) in custom_headers {
+                request = request.header(key, value)?;
+            }
+        }
+
+        Ok(request.api_post(payload).await?)
+    }
+
+    fn anthropic_api_call_result(response: ApiResponse) -> Result<Value, ProviderError> {
+        match response.status {
+            StatusCode::OK => response.payload.ok_or_else(|| {
+                ProviderError::RequestFailed("Response body is not valid JSON".to_string())
+            }),
+            _ => {
+                if response.status == StatusCode::BAD_REQUEST {
+                    if let Some(error_msg) = response
+                        .payload
+                        .as_ref()
+                        .and_then(|p| p.get("error"))
+                        .and_then(|e| e.get("message"))
+                        .and_then(|m| m.as_str())
+                    {
+                        let msg = error_msg.to_string();
+                        if msg.to_lowercase().contains("too long")
+                            || msg.to_lowercase().contains("too many")
+                        {
+                            return Err(ProviderError::ContextLengthExceeded(msg));
+                        }
+                    }
+                }
+                Err(map_http_error_to_provider_error(
+                    response.status,
+                    response.payload,
+                ))
+            }
+        }
+    }
+
+    async fn get_session_metadata(&self, session_id: Option<&str>) -> Option<Value> {
+        let session_id = session_id?;
+        let session = crate::session::SessionManager::instance()
+            .get_session(session_id, false)
+            .await
+            .ok()?;
+
+        let websocket_headers = session
+            .extension_data
+            .get_extension_state("websocket_headers", "v0")?;
+
+        let user_id = websocket_headers.as_object().and_then(|headers| {
+            headers.iter().find_map(|(k, v)| {
+                if k.eq_ignore_ascii_case("x-cow-security-context") {
+                    v.as_str().and_then(|s| {
+                        serde_json::from_str::<Value>(s).ok().and_then(|json| {
+                            json.get("ID")
+                                .and_then(|e| e.as_str().map(|s| s.to_string()))
+                        })
+                    })
+                } else {
+                    None
+                }
+            })
+        })?;
+
+        Some(json!({ "user_id": user_id }))
+    }
 }
 
 impl ProviderDef for AnthropicProvider {
@@ -225,7 +305,8 @@ impl Provider for AnthropicProvider {
         messages: &[Message],
         tools: &[Tool],
     ) -> Result<MessageStream, ProviderError> {
-        let mut payload = create_request(model_config, system, messages, tools)?;
+        let metadata = self.get_session_metadata(Some(session_id)).await;
+        let mut payload = create_request(model_config, system, messages, tools, metadata)?;
         payload
             .as_object_mut()
             .unwrap()
