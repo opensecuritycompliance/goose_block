@@ -8,7 +8,7 @@ use std::io;
 use tokio::pin;
 use tokio_util::io::StreamReader;
 
-use super::api_client::{ApiClient, AuthMethod};
+use super::api_client::{ApiClient, ApiResponse, AuthMethod};
 use super::base::{ConfigKey, MessageStream, ModelInfo, Provider, ProviderDef, ProviderMetadata};
 use super::errors::ProviderError;
 use super::formats::anthropic::{
@@ -132,6 +132,29 @@ impl AnthropicProvider {
         })
     }
 
+    /// Create an AnthropicProvider with an explicit API key (for per-session provider switching).
+    pub fn from_api_key(model: ModelConfig, api_key: &str) -> Result<Self> {
+        let host = crate::config::Config::global()
+            .get_param("ANTHROPIC_HOST")
+            .unwrap_or_else(|_| "https://api.anthropic.com".to_string());
+
+        let auth = AuthMethod::ApiKey {
+            header_name: "x-api-key".to_string(),
+            key: api_key.to_string(),
+        };
+
+        let api_client =
+            ApiClient::new(host, auth)?.with_header("anthropic-version", ANTHROPIC_API_VERSION)?;
+
+        Ok(Self {
+            api_client,
+            model,
+            supports_streaming: true,
+            custom_headers: None,
+            name: ANTHROPIC_PROVIDER_NAME.to_string(),
+        })
+    }
+
     fn get_conditional_headers(&self) -> Vec<(&str, &str)> {
         let mut headers = Vec::new();
 
@@ -145,6 +168,7 @@ impl AnthropicProvider {
         headers
     }
 
+    #[allow(dead_code)]
     async fn post(
         &self,
         session_id: Option<&str>,
@@ -165,6 +189,7 @@ impl AnthropicProvider {
         Ok(request.api_post(payload).await?)
     }
 
+    #[allow(dead_code)]
     fn anthropic_api_call_result(response: ApiResponse) -> Result<Value, ProviderError> {
         match response.status {
             StatusCode::OK => response.payload.ok_or_else(|| {
@@ -175,9 +200,9 @@ impl AnthropicProvider {
                     if let Some(error_msg) = response
                         .payload
                         .as_ref()
-                        .and_then(|p| p.get("error"))
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
+                        .and_then(|p: &Value| p.get("error"))
+                        .and_then(|e: &Value| e.get("message"))
+                        .and_then(|m: &Value| m.as_str())
                     {
                         let msg = error_msg.to_string();
                         if msg.to_lowercase().contains("too long")

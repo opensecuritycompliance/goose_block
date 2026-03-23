@@ -20,7 +20,7 @@ use std::time::Duration;
 use tempfile::{tempdir, TempDir};
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 use tokio_stream::wrappers::ReceiverStream;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, warn};
@@ -63,6 +63,8 @@ struct Extension {
     pub config: ExtensionConfig,
 
     client: McpClientBox,
+    resolved_headers: Option<HashMap<String, String>>,
+    session_clients: Arc<tokio::sync::Mutex<HashMap<String, McpClientBox>>>,
     server_info: Option<ServerInfo>,
     _temp_dir: Option<tempfile::TempDir>,
 }
@@ -71,12 +73,15 @@ impl Extension {
     fn new(
         config: ExtensionConfig,
         client: McpClientBox,
+        resolved_headers: Option<HashMap<String, String>>,
         server_info: Option<ServerInfo>,
         temp_dir: Option<tempfile::TempDir>,
     ) -> Self {
         Self {
             client,
             config,
+            resolved_headers,
+            session_clients: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             server_info,
             _temp_dir: temp_dir,
         }
@@ -106,7 +111,7 @@ pub struct ExtensionManagerCapabilities {
 
 /// Manages goose extensions / MCP clients and their interactions
 pub struct ExtensionManager {
-    extensions: Mutex<HashMap<String, Extension>>,
+    extensions: RwLock<HashMap<String, Extension>>,
     context: PlatformExtensionContext,
     provider: SharedProvider,
     tools_cache: Mutex<Option<Arc<Vec<Tool>>>>,
@@ -486,7 +491,7 @@ impl ExtensionManager {
         capabilities: ExtensionManagerCapabilities,
     ) -> Self {
         Self {
-            extensions: Mutex::new(HashMap::new()),
+            extensions: RwLock::new(HashMap::new()),
             context: PlatformExtensionContext {
                 extension_manager: None,
                 session_manager,
@@ -521,7 +526,7 @@ impl ExtensionManager {
 
     pub async fn supports_resources(&self) -> bool {
         self.extensions
-            .lock()
+            .read()
             .await
             .values()
             .any(|ext| ext.supports_resources())
@@ -539,13 +544,13 @@ impl ExtensionManager {
     ) -> ExtensionResult<()> {
         let sanitized_name = config.key();
 
-        if self.extensions.lock().await.contains_key(&sanitized_name) {
+        if self.extensions.read().await.contains_key(&sanitized_name) {
             return Ok(());
         }
 
         let mut temp_dir = None;
 
-        let client: Box<dyn McpClientTrait> = match &config {
+        let (client, resolved_headers): (Box<dyn McpClientTrait>, Option<HashMap<String, String>>) = match &config {
             ExtensionConfig::Sse { .. } => {
                 return Err(ExtensionError::ConfigError(
                     "SSE is unsupported, migrate to streamable_http".to_string(),
@@ -573,8 +578,7 @@ impl ExtensionManager {
                         if let Some(headers_value) = session.extension_data.get_extension_state("websocket_headers", "v0") {
                             if let Some(headers_obj) = headers_value.as_object() {
                                 for (key, value) in headers_obj {
-                                    let allowed = allowed_headers;
-                                    if !allowed.is_empty() && !allowed.contains(key) {
+                                    if !allowed_headers.is_empty() && !allowed_headers.contains(key) {
                                         tracing::debug!("[EXTENSION_MANAGER] Skipping header '{}' - not in allowed_headers list", key);
                                         continue;
                                     }
@@ -590,8 +594,7 @@ impl ExtensionManager {
                 let capability = GooseMcpClientCapabilities {
                     mcpui: self.capabilities.mcpui,
                 };
-
-                create_streamable_http_client(
+                let client = create_streamable_http_client(
                     uri,
                     *timeout,
                     &resolved_headers,
@@ -600,7 +603,8 @@ impl ExtensionManager {
                     self.client_name.clone(),
                     capability,
                 )
-                .await?
+                .await?;
+                (client, Some(resolved_headers))
             }
             ExtensionConfig::Builtin { ref name, .. }
             | ExtensionConfig::Platform { ref name, .. } => {
@@ -622,7 +626,7 @@ impl ExtensionManager {
                             context.session = Some(Arc::new(session));
                         }
                     }
-                    (def.client_factory)(context)
+                    ((def.client_factory)(context), None)
                 } else {
                     // Builtin MCP server extension
                     let timeout_secs = timeout.unwrap_or(crate::config::DEFAULT_EXTENSION_TIMEOUT);
@@ -666,7 +670,7 @@ impl ExtensionManager {
                             capabilities,
                         )
                         .await?;
-                        Box::new(client)
+                        (Box::new(client) as Box<dyn McpClientTrait>, None)
                     } else {
                         let (server_read, client_write) = tokio::io::duplex(65536);
                         let (client_read, server_write) = tokio::io::duplex(65536);
@@ -676,16 +680,15 @@ impl ExtensionManager {
                             mcpui: self.capabilities.mcpui,
                         };
 
-                        Box::new(
-                            McpClient::connect(
-                                (client_read, client_write),
-                                Duration::from_secs(timeout_secs),
-                                self.provider.clone(),
-                                self.client_name.clone(),
-                                capabilities,
-                            )
-                            .await?,
+                        let client = McpClient::connect(
+                            (client_read, client_write),
+                            Duration::from_secs(timeout_secs),
+                            self.provider.clone(),
+                            self.client_name.clone(),
+                            capabilities,
                         )
+                        .await?;
+                        (Box::new(client) as Box<dyn McpClientTrait>, None)
                     }
                 }
             }
@@ -747,7 +750,7 @@ impl ExtensionManager {
                     capabilities,
                 )
                 .await?;
-                Box::new(client)
+                (Box::new(client) as Box<dyn McpClientTrait>, None)
             }
             ExtensionConfig::InlinePython {
                 name,
@@ -789,7 +792,7 @@ impl ExtensionManager {
                 )
                 .await?;
 
-                Box::new(client)
+                (Box::new(client) as Box<dyn McpClientTrait>, None)
             }
             ExtensionConfig::Frontend { .. } => {
                 return Err(ExtensionError::ConfigError(
@@ -800,10 +803,10 @@ impl ExtensionManager {
 
         let server_info = client.get_info().cloned();
 
-        let mut extensions = self.extensions.lock().await;
+        let mut extensions = self.extensions.write().await;
         extensions.insert(
             sanitized_name,
-            Extension::new(config, Arc::from(client), server_info, temp_dir),
+            Extension::new(config, Arc::from(client), resolved_headers, server_info, temp_dir),
         );
         drop(extensions);
         self.invalidate_tools_cache_and_bump_version().await;
@@ -821,9 +824,9 @@ impl ExtensionManager {
     ) {
         let normalized = name_to_key(&name);
         self.extensions
-            .lock()
+            .write()
             .await
-            .insert(normalized, Extension::new(config, client, info, temp_dir));
+            .insert(normalized, Extension::new(config, client, None, info, temp_dir));
         self.invalidate_tools_cache_and_bump_version().await;
     }
 
@@ -831,7 +834,7 @@ impl ExtensionManager {
     pub async fn get_extensions_info(&self, working_dir: &std::path::Path) -> Vec<ExtensionInfo> {
         let working_dir_str = working_dir.to_string_lossy();
         self.extensions
-            .lock()
+            .read()
             .await
             .iter()
             .map(|(name, ext)| {
@@ -845,13 +848,13 @@ impl ExtensionManager {
     /// Get aggregated usage statistics
     pub async fn remove_extension(&self, name: &str) -> ExtensionResult<()> {
         let sanitized_name = name_to_key(name);
-        self.extensions.lock().await.remove(&sanitized_name);
+        self.extensions.write().await.remove(&sanitized_name);
         self.invalidate_tools_cache_and_bump_version().await;
         Ok(())
     }
 
     pub async fn get_extension_and_tool_counts(&self, session_id: &str) -> (usize, usize) {
-        let enabled_extensions_count = self.extensions.lock().await.len();
+        let enabled_extensions_count = self.extensions.read().await.len();
 
         let total_tools = self
             .get_prefixed_tools(session_id, None)
@@ -863,17 +866,17 @@ impl ExtensionManager {
     }
 
     pub async fn list_extensions(&self) -> ExtensionResult<Vec<String>> {
-        Ok(self.extensions.lock().await.keys().cloned().collect())
+        Ok(self.extensions.read().await.keys().cloned().collect())
     }
 
     pub async fn is_extension_enabled(&self, name: &str) -> bool {
         let normalized = name_to_key(name);
-        self.extensions.lock().await.contains_key(&normalized)
+        self.extensions.read().await.contains_key(&normalized)
     }
 
     pub async fn get_extension_configs(&self) -> Vec<ExtensionConfig> {
         self.extensions
-            .lock()
+            .read()
             .await
             .values()
             .map(|ext| ext.config.clone())
@@ -961,7 +964,7 @@ impl ExtensionManager {
     async fn fetch_all_tools(&self, session_id: &str) -> ExtensionResult<Vec<Tool>> {
         let clients: Vec<_> = self
             .extensions
-            .lock()
+            .read()
             .await
             .iter()
             .map(|(name, ext)| (name.clone(), ext.config.clone(), ext.get_client()))
@@ -1103,7 +1106,7 @@ impl ExtensionManager {
         // currently it will return the first match and skip any others
         let extension_names: Vec<String> = self
             .extensions
-            .lock()
+            .read()
             .await
             .iter()
             .filter(|(_name, ext)| ext.supports_resources())
@@ -1132,7 +1135,7 @@ impl ExtensionManager {
         // None of the extensions had the resource so we raise an error
         let available_extensions = self
             .extensions
-            .lock()
+            .read()
             .await
             .keys()
             .map(|s| s.as_str())
@@ -1159,7 +1162,7 @@ impl ExtensionManager {
     ) -> Result<rmcp::model::ReadResourceResult, ErrorData> {
         let available_extensions = self
             .extensions
-            .lock()
+            .read()
             .await
             .keys()
             .map(|s| s.as_str())
@@ -1171,7 +1174,7 @@ impl ExtensionManager {
         );
 
         let client = self
-            .get_server_client(extension_name)
+            .get_server_client(extension_name, Some(session_id))
             .await
             .ok_or(ErrorData::new(ErrorCode::INVALID_PARAMS, error_msg, None))?;
 
@@ -1194,7 +1197,7 @@ impl ExtensionManager {
         let mut ui_resources = Vec::new();
 
         let extensions_to_check: Vec<(String, McpClientBox)> = {
-            let extensions = self.extensions.lock().await;
+            let extensions = self.extensions.read().await;
             extensions
                 .iter()
                 .map(|(name, ext)| (name.clone(), ext.get_client()))
@@ -1229,7 +1232,7 @@ impl ExtensionManager {
         cancellation_token: CancellationToken,
     ) -> Result<Vec<Content>, ErrorData> {
         let client = self
-            .get_server_client(extension_name)
+            .get_server_client(extension_name, Some(session_id))
             .await
             .ok_or_else(|| {
                 ErrorData::new(
@@ -1281,7 +1284,7 @@ impl ExtensionManager {
 
                 // Create futures for each resource_capable_extension
                 self.extensions
-                    .lock()
+                    .read()
                     .await
                     .iter()
                     .filter(|(_name, ext)| ext.supports_resources())
@@ -1331,7 +1334,7 @@ impl ExtensionManager {
     ) -> Result<ResolvedTool, ErrorData> {
         if let Some((prefix, actual)) = tool_name.split_once("__") {
             let owner = name_to_key(prefix);
-            if let Some(client) = self.get_server_client(&owner).await {
+            if let Some(client) = self.get_server_client(&owner, Some(session_id)).await {
                 return Ok(ResolvedTool {
                     extension_name: owner,
                     actual_tool_name: actual.to_string(),
@@ -1362,7 +1365,7 @@ impl ExtensionManager {
                 .unwrap_or(tool_name)
                 .to_string();
 
-            let client = self.get_server_client(&owner).await.ok_or_else(|| {
+            let client = self.get_server_client(&owner, Some(session_id)).await.ok_or_else(|| {
                 ErrorData::new(
                     ErrorCode::RESOURCE_NOT_FOUND,
                     format!("Extension '{}' not found for tool '{}'", owner, tool_name),
@@ -1396,7 +1399,7 @@ impl ExtensionManager {
 
         // Check tool availability and get allowed headers in one lock
         let allowed_headers = {
-            let extensions = self.extensions.lock().await;
+            let extensions = self.extensions.read().await;
             if let Some(extension) = extensions.get(&resolved.extension_name) {
                 if !extension
                     .config
@@ -1436,23 +1439,24 @@ impl ExtensionManager {
         // We use the passed session_id which ensures the tool runs in the correct session context
         tracing::debug!("[EXTENSION_MANAGER] Using session_id for tool call: {}", session_id);
 
+        let fut_session_id = session_id.clone();
         let fut = async move {
-            client
+            let res = client
                 .call_tool(
-                    &session_id,
+                    &fut_session_id,
                     &actual_tool_name,
                     arguments,
                     working_dir_str.as_deref(),
                     cancellation_token,
                     allowed_headers,
                 )
-                .await
-                .map_err(|e| match e {
-                    ServiceError::McpError(error_data) => error_data,
-                    _ => {
-                        ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), e.maybe_to_value())
-                    }
-                })
+                .await;
+            res.map_err(|e| match e {
+                ServiceError::McpError(error_data) => error_data,
+                _ => {
+                    ErrorData::new(ErrorCode::INTERNAL_ERROR, e.to_string(), e.maybe_to_value())
+                }
+            })
         };
 
         Ok(ToolCallResult {
@@ -1468,7 +1472,7 @@ impl ExtensionManager {
         cancellation_token: CancellationToken,
     ) -> Result<Vec<Prompt>, ErrorData> {
         let client = self
-            .get_server_client(extension_name)
+            .get_server_client(extension_name, Some(session_id))
             .await
             .ok_or_else(|| {
                 ErrorData::new(
@@ -1498,7 +1502,7 @@ impl ExtensionManager {
     ) -> Result<HashMap<String, Vec<Prompt>>, ErrorData> {
         let mut futures = FuturesUnordered::new();
 
-        let names: Vec<_> = self.extensions.lock().await.keys().cloned().collect();
+        let names: Vec<_> = self.extensions.read().await.keys().cloned().collect();
         for extension_name in names {
             let token = cancellation_token.clone();
             futures.push(async move {
@@ -1548,7 +1552,7 @@ impl ExtensionManager {
         cancellation_token: CancellationToken,
     ) -> Result<GetPromptResult> {
         let client = self
-            .get_server_client(extension_name)
+            .get_server_client(extension_name, Some(session_id))
             .await
             .ok_or_else(|| anyhow::anyhow!("Extension {} not found", extension_name))?;
 
@@ -1591,7 +1595,7 @@ impl ExtensionManager {
 
         // Get currently enabled extensions that can be disabled
         let enabled_extensions: Vec<String> =
-            self.extensions.lock().await.keys().cloned().collect();
+            self.extensions.read().await.keys().cloned().collect();
 
         // Build output string
         if !disabled_extensions.is_empty() {
@@ -1619,13 +1623,59 @@ impl ExtensionManager {
         Ok(vec![Content::text(output_parts.join("\n"))])
     }
 
-    async fn get_server_client(&self, name: impl Into<String>) -> Option<McpClientBox> {
+    async fn get_server_client(&self, name: impl Into<String>, session_id: Option<&str>) -> Option<McpClientBox> {
         let normalized = name_to_key(&name.into());
-        self.extensions
-            .lock()
-            .await
-            .get(&normalized)
-            .map(|ext| ext.get_client())
+        let (fallback_client, config, resolved_headers, session_clients) = {
+            let extensions = self.extensions.read().await;
+            if let Some(ext) = extensions.get(&normalized) {
+                (
+                    ext.client.clone(),
+                    ext.config.clone(),
+                    ext.resolved_headers.clone(),
+                    ext.session_clients.clone(),
+                )
+            } else {
+                return None;
+            }
+        };
+
+        if let Some(sid) = session_id {
+            if let ExtensionConfig::StreamableHttp { uri, timeout, name, .. } = &config {
+                {
+                    let lock = session_clients.lock().await;
+                    if let Some(c) = lock.get(sid) {
+                        return Some(c.clone());
+                    }
+                }
+
+                let headers = resolved_headers.unwrap_or_default();
+                let capability = GooseMcpClientCapabilities {
+                    mcpui: self.capabilities.mcpui,
+                };
+
+                match create_streamable_http_client(
+                    uri,
+                    *timeout,
+                    &headers,
+                    name,
+                    self.provider.clone(),
+                    self.client_name.clone(),
+                    capability,
+                ).await {
+                    Ok(new_client) => {
+                        let arc_client: McpClientBox = Arc::from(new_client);
+                        let mut lock = session_clients.lock().await;
+                        lock.insert(sid.to_string(), arc_client.clone());
+                        return Some(arc_client);
+                    }
+                    Err(e) => {
+                        tracing::error!("Failed to create per-session StreamableHttp client for {}: {}", name, e);
+                    }
+                }
+            }
+        }
+
+        Some(fallback_client)
     }
 
     pub async fn collect_moim(
@@ -1674,7 +1724,7 @@ impl ExtensionManager {
         }
 
         let platform_clients: Vec<(String, McpClientBox)> = {
-            let extensions = self.extensions.lock().await;
+            let extensions = self.extensions.read().await;
             extensions
                 .iter()
                 .filter_map(|(name, extension)| {
@@ -1744,9 +1794,9 @@ mod tests {
                 bundled: None,
                 available_tools,
             };
-            let extension = Extension::new(config, client, None, None);
+            let extension = Extension::new(config, client, None, None, None);
             self.extensions
-                .lock()
+                .write()
                 .await
                 .insert(sanitized_name, extension);
             self.invalidate_tools_cache_and_bump_version().await;

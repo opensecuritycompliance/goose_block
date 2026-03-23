@@ -427,15 +427,15 @@ async fn websocket_handler(
         }
     }
 
-    eprintln!("[WEBSOCKET] WebSocket upgrade request received with {} headers", headers.len());
-    
+    tracing::debug!("[WEBSOCKET] WebSocket upgrade request received with {} headers", headers.len());
+
     // Extract headers from HTTP request and convert to HashMap
     let mut request_headers = std::collections::HashMap::new();
     for (key, value) in headers.iter() {
         if let Ok(value_str) = value.to_str() {
             let key_str = key.as_str().to_string();
             request_headers.insert(key_str, value_str.to_string());
-            eprintln!("[WEBSOCKET] Header from upgrade request: {} = {}", key.as_str(), value_str);
+            tracing::trace!("[WEBSOCKET] Header from upgrade request: {} = {}", key.as_str(), value_str);
         }
     }
     
@@ -456,18 +456,20 @@ async fn handle_socket(
     
     // Log headers from upgrade request
     let headers = request_headers.lock().await;
-    eprintln!("[WEBSOCKET] Connection established with {} headers from upgrade request", headers.len());
+    tracing::debug!("[WEBSOCKET] Connection established with {} headers from upgrade request", headers.len());
     if !headers.is_empty() {
-        eprintln!("[WEBSOCKET] Headers from upgrade: {:?}", headers);
+        tracing::debug!("[WEBSOCKET] Headers from upgrade: {:?}", headers);
     }
     drop(headers);
+
+    let mut last_session_id: Option<String> = None;
 
     while let Some(msg) = receiver.next().await {
         if let Ok(msg) = msg {
             match msg {
                 Message::Text(text) => {
                     let text_str = text.to_string();
-                    eprintln!("[WEBSOCKET] Raw message received: {}", text_str);
+                    tracing::trace!("[WEBSOCKET] Raw message received: {}", text_str);
                     match serde_json::from_str::<WebSocketMessage>(&text_str) {
                         Ok(WebSocketMessage::Message {
                             content,
@@ -475,12 +477,12 @@ async fn handle_socket(
                             headers: _json_headers,
                             ..
                         }) => {
-                            eprintln!("[WEBSOCKET] Parsed message - session_id: {}, has_json_headers: {}", 
+                            tracing::debug!("[WEBSOCKET] Parsed message - session_id: {}, has_json_headers: {}",
                                 session_id, _json_headers.is_some());
 
                             // Ensure session exists
                             if goose::session::SessionManager::instance().get_session(&session_id, false).await.is_err() {
-                                eprintln!("[WEBSOCKET] Session {} not found, creating new session", session_id);
+                                tracing::debug!("[WEBSOCKET] Session {} not found, creating new session", session_id);
                                 let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
                                 if let Err(e) = goose::session::SessionManager::instance().create_session_with_id(
                                     &session_id,
@@ -496,10 +498,10 @@ async fn handle_socket(
                             let headers_to_store = {
                                 let upgrade_headers = request_headers.lock().await;
                                 if !upgrade_headers.is_empty() {
-                                    eprintln!("[WEBSOCKET] Using headers from HTTP upgrade request: {:?}", upgrade_headers);
+                                    tracing::debug!("[WEBSOCKET] Using headers from HTTP upgrade request");
                                     Some(upgrade_headers.clone())
                                 } else if let Some(ref json_headers) = _json_headers {
-                                    eprintln!("[WEBSOCKET] Using headers from JSON message: {:?}", json_headers);
+                                    tracing::debug!("[WEBSOCKET] Using headers from JSON message");
                                     Some(json_headers.clone())
                                 } else {
                                     None
@@ -507,8 +509,7 @@ async fn handle_socket(
                             };
                             
                             if let Some(ref headers) = headers_to_store {
-                                eprintln!("[WEBSOCKET] Received headers for session {}: {:?}", session_id, headers);
-                                tracing::info!("[WEBSOCKET] Received headers for session {}: {:?}", session_id, headers);
+                                tracing::debug!("[WEBSOCKET] Received headers for session {}", session_id);
                                 if let Err(e) = goose::session::SessionManager::instance().update(&session_id)
                                     .extension_data({
                                         let mut ext_data = goose::session::SessionManager::instance().get_session(&session_id, false)
@@ -520,32 +521,41 @@ async fn handle_socket(
                                             "v0",
                                             serde_json::to_value(headers).unwrap_or_default(),
                                         );
-                                        eprintln!("[WEBSOCKET] Stored headers in session extension_data: {:?}", headers);
-                                        tracing::info!("[WEBSOCKET] Stored headers in session extension_data: {:?}", headers);
+                                        tracing::debug!("[WEBSOCKET] Stored headers in session extension_data");
                                         ext_data
                                     })
                                     .apply()
                                     .await
                                 {
-                                    eprintln!("[WEBSOCKET] ERROR: Failed to store headers in session: {}", e);
                                     error!("Failed to store headers in session: {}", e);
                                 } else {
-                                    eprintln!("[WEBSOCKET] Successfully stored headers in session {}", session_id);
-                                    tracing::info!("[WEBSOCKET] Successfully stored headers in session {}", session_id);
+                                    tracing::debug!("[WEBSOCKET] Successfully stored headers in session {}", session_id);
                                 }
                             } else {
-                                eprintln!("[WEBSOCKET] No headers in websocket message for session {}", session_id);
                                 tracing::debug!("[WEBSOCKET] No headers in websocket message for session {}", session_id);
                             }
 
-                            let sender_clone = sender.clone();
+                            last_session_id = Some(session_id.clone());
+
+                            // Ensure session-specific provider is created from headers
+                            // BEFORE spawning the message-processing task.  This avoids a
+                            // race where the spawned task reads session data before the
+                            // SQLite write above has been fully observed.
                             let agent = state.agent.clone();
+                            goose::session::SessionManager::instance().log_pool_stats(
+                                &format!("on_message({})", session_id),
+                            );
+                            if let Err(e) = agent.ensure_session_provider(&session_id).await {
+                                tracing::warn!("[SESSION_PROVIDER] Failed to ensure session provider for {}: {}", session_id, e);
+                            }
+
+                            let sender_clone = sender.clone();
                             let session_id_clone = session_id.clone();
 
                             let task_handle = tokio::spawn(async move {
                                 let result = process_message_streaming(
                                     &agent,
-                                    session_id_clone,
+                                    session_id_clone.clone(),
                                     content,
                                     sender_clone,
                                 )
@@ -621,9 +631,8 @@ async fn handle_socket(
                             // Ignore other message types
                         }
                         Err(e) => {
-                            eprintln!("[WEBSOCKET] ERROR: Failed to parse WebSocket message: {}", e);
-                            eprintln!("[WEBSOCKET] Raw message was: {}", text_str);
                             error!("Failed to parse WebSocket message: {}", e);
+                            tracing::debug!("[WEBSOCKET] Raw message was: {}", text_str);
                         }
                     }
                 }
@@ -633,6 +642,17 @@ async fn handle_socket(
         } else {
             break;
         }
+    }
+
+    // Cleanup: remove session-specific provider on disconnect
+    if let Some(ref session_id) = last_session_id {
+        let label = format!("before_disconnect({})", session_id);
+        goose::session::SessionManager::instance().log_pool_stats(&label);
+
+        state.agent.remove_session_provider(session_id).await;
+
+        let label = format!("after_disconnect({})", session_id);
+        goose::session::SessionManager::instance().log_pool_stats(&label);
     }
 }
 
@@ -648,7 +668,7 @@ async fn process_message_streaming(
 
     let user_message = GooseMessage::user().with_text(content.clone());
 
-    let provider = agent.provider().await;
+    let provider = agent.provider_for_session(&session_id).await;
     if provider.is_err() {
         let error_msg = "I'm not properly configured yet. Please configure a provider through the CLI first using `goose configure`.".to_string();
         let mut sender = sender.lock().await;
@@ -691,14 +711,11 @@ async fn process_message_streaming(
                     Ok(AgentEvent::HistoryReplaced(_)) => {
                         tracing::info!("History replaced, compacting happened in reply");
                     }
-                    Ok(AgentEvent::McpNotification(_)) => {
-                        tracing::info!("Received MCP notification in web interface");
-                    }
+                    Ok(AgentEvent::McpNotification(_)) => {}
                     Ok(AgentEvent::ModelChange { model, mode }) => {
                         tracing::info!("Model changed to {} in {} mode", model, mode);
                     }
                     Err(e) => {
-                        error!("Error in message stream: {}", e);
                         send_error(&sender, &format!("Error: {}", e)).await;
                         break;
                     }
@@ -706,7 +723,6 @@ async fn process_message_streaming(
             }
         }
         Err(e) => {
-            error!("Error calling agent: {}", e);
             send_error(&sender, &format!("Error: {}", e)).await;
         }
     }

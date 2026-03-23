@@ -1407,6 +1407,7 @@ mod tests {
             timeout: None,
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: vec![],
         })
     )]
     #[test_case(

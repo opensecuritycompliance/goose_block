@@ -263,6 +263,7 @@ impl McpClientTrait for AnalyzeClient {
         arguments: Option<JsonObject>,
         working_dir: Option<&str>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let working_dir = working_dir.map(Path::new);
         match name {

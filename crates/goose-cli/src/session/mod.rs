@@ -2039,6 +2039,7 @@ mod tests {
             timeout: Some(300),
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "name_from_host"
     )]
@@ -2054,6 +2055,7 @@ mod tests {
             timeout: Some(300),
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "port_and_path"
     )]
@@ -2069,6 +2071,7 @@ mod tests {
             timeout: Some(300),
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "different_port_and_path"
     )]

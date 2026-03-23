@@ -143,6 +143,29 @@ impl OpenAiProvider {
         }
     }
 
+    /// Create an OpenAiProvider with an explicit API key (for per-session provider switching).
+    pub fn from_api_key(model: ModelConfig, api_key: &str) -> Result<Self> {
+        let config = crate::config::Config::global();
+        let host: String = config
+            .get_param("OPENAI_HOST")
+            .unwrap_or_else(|_| "https://api.openai.com".to_string());
+
+        let auth = AuthMethod::BearerToken(api_key.to_string());
+        let api_client =
+            ApiClient::with_timeout(host, auth, std::time::Duration::from_secs(600))?;
+
+        Ok(Self {
+            api_client,
+            base_path: OPEN_AI_DEFAULT_BASE_PATH.to_string(),
+            organization: None,
+            project: None,
+            model,
+            custom_headers: None,
+            supports_streaming: true,
+            name: OPEN_AI_PROVIDER_NAME.to_string(),
+        })
+    }
+
     pub fn from_custom_config(
         model: ModelConfig,
         config: DeclarativeProviderConfig,

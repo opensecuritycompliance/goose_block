@@ -1736,6 +1736,7 @@ impl McpClientTrait for SummonClient {
         arguments: Option<JsonObject>,
         _working_dir: Option<&str>,
         cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let content = match name {
             "load" => self.handle_load(session_id, arguments).await,
@@ -1950,7 +1951,7 @@ You review code."#;
         assert!(names.contains(&"load") && names.contains(&"delegate"));
 
         let result = client
-            .call_tool("test", "unknown", None, None, CancellationToken::new())
+            .call_tool("test", "unknown", None, None, CancellationToken::new(), None)
             .await
             .unwrap();
         assert!(result.is_error.unwrap_or(false));

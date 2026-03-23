@@ -463,6 +463,7 @@ impl ExtensionConfig {
                 timeout,
                 bundled,
                 available_tools,
+                allowed_headers,
             } => {
                 let merged = merge_environments(&envs, &env_keys, &name, config).await?;
                 let headers = headers
@@ -482,6 +483,7 @@ impl ExtensionConfig {
                     timeout,
                     bundled,
                     available_tools,
+                    allowed_headers,
                 })
             }
             other => Ok(other),
@@ -681,6 +683,7 @@ available_tools: []
             timeout: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -701,6 +704,7 @@ available_tools: []
             timeout: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "header_substitution"
     )]
@@ -774,6 +778,7 @@ available_tools: []
             timeout: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         },
         ExtensionConfig::StreamableHttp {
             name: "test".into(),
@@ -791,6 +796,7 @@ available_tools: []
             timeout: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }
         ; "http_env_key_and_header_substitution"
     )]

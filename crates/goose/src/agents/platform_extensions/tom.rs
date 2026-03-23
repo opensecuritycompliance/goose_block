@@ -68,6 +68,7 @@ impl McpClientTrait for TomClient {
         _arguments: Option<JsonObject>,
         _working_dir: Option<&str>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         Ok(CallToolResult::error(vec![Content::text(format!(
             "tom has no tools (called: {name})"

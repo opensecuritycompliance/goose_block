@@ -1097,7 +1097,7 @@ mod tests {
         let mut config = cfg("claude-opus-4-6");
         config.max_tokens = Some(4096);
         let messages = vec![Message::user().with_text("Hello")];
-        let payload = create_request(&config, "system", &messages, &[])?;
+        let payload = create_request(&config, "system", &messages, &[], None)?;
 
         assert_eq!(payload["thinking"]["type"], "adaptive");
         assert_eq!(payload["output_config"]["effort"], "high");
@@ -1124,7 +1124,7 @@ mod tests {
         config.request_params = Some(params);
 
         let messages = vec![Message::user().with_text("Hello")];
-        let payload = create_request(&config, "system", &messages, &[])?;
+        let payload = create_request(&config, "system", &messages, &[], None)?;
 
         assert_eq!(payload["thinking"]["type"], "enabled");
         assert_eq!(payload["thinking"]["budget_tokens"], 10000);
@@ -1142,7 +1142,7 @@ mod tests {
 
         let config = cfg("claude-sonnet-4-20250514");
         let messages = vec![Message::user().with_text("Hello")];
-        let payload = create_request(&config, "system", &messages, &[])?;
+        let payload = create_request(&config, "system", &messages, &[], None)?;
 
         assert!(payload.get("thinking").is_none());
         assert!(payload.get("output_config").is_none());

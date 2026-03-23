@@ -147,6 +147,32 @@ pub async fn create_with_named_model(
     create(provider_name, config, extensions).await
 }
 
+/// Create a provider with an explicit API key (for per-session provider switching).
+/// Supports anthropic and openai providers. Others will return an error.
+pub fn create_with_api_key(
+    provider_name: &str,
+    model_name: &str,
+    api_key: &str,
+) -> Result<Arc<dyn Provider>> {
+    let model_config = ModelConfig::new(model_name)?.with_canonical_limits(provider_name);
+
+    match provider_name {
+        "anthropic" => {
+            let provider = AnthropicProvider::from_api_key(model_config, api_key)?;
+            Ok(Arc::new(provider))
+        }
+        "openai" => {
+            let provider = OpenAiProvider::from_api_key(model_config, api_key)?;
+            Ok(Arc::new(provider))
+        }
+        _ => Err(anyhow::anyhow!(
+            "Provider '{}' does not support runtime API key injection. \
+             Supported providers: anthropic, openai",
+            provider_name
+        )),
+    }
+}
+
 async fn create_lead_worker_from_env(
     default_provider_name: &str,
     default_model: &ModelConfig,

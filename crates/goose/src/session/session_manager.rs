@@ -291,6 +291,18 @@ impl SessionManager {
         self.storage.get_session(id, include_messages).await
     }
 
+    /// Log SQLite pool stats (temporary diagnostic helper).
+    pub fn log_pool_stats(&self, label: &str) {
+        let pool = &self.storage.pool;
+        println!(
+            "[POOL_STATS] {}: size={}, idle={}, active={}",
+            label,
+            pool.size(),
+            pool.num_idle(),
+            pool.size() - pool.num_idle() as u32,
+        );
+    }
+
     pub fn update(&self, id: &str) -> SessionUpdateBuilder<'_> {
         SessionUpdateBuilder::new(self, id.to_string())
     }
@@ -509,7 +521,12 @@ impl SessionStorage {
             .busy_timeout(std::time::Duration::from_secs(30))
             .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal);
 
-        SqlitePoolOptions::new().connect_lazy_with(options)
+        let max_connections = std::env::var("GOOSE_DB_MAX_CONNECTIONS")
+            .ok()
+            .and_then(|v| v.parse::<u32>().ok())
+            .unwrap_or(50);
+
+        SqlitePoolOptions::new().max_connections(max_connections).connect_lazy_with(options)
     }
 
     pub fn new(data_dir: PathBuf) -> Self {

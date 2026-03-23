@@ -1131,6 +1131,7 @@ mod tests {
             timeout: None,
             bundled: Some(false),
             available_tools: vec![],
+            allowed_headers: vec![],
         }],
         Some(json!({ "mcpServers": {
             "lookup": {
@@ -1152,6 +1153,7 @@ mod tests {
             timeout: None,
             bundled: None,
             available_tools: vec![],
+            allowed_headers: vec![],
         }],
         Some(json!({ "mcpServers": {
             "mcp_kiwi_com": {

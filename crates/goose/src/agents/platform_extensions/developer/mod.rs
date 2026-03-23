@@ -170,6 +170,7 @@ impl McpClientTrait for DeveloperClient {
         arguments: Option<JsonObject>,
         working_dir: Option<&str>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let working_dir = working_dir.map(Path::new);
         match name {
@@ -260,6 +261,7 @@ mod tests {
                 })),
                 Some(cwd.to_str().unwrap()),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -280,6 +282,7 @@ mod tests {
                 })),
                 Some(cwd.to_str().unwrap()),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();
@@ -307,6 +310,7 @@ mod tests {
                 })),
                 Some(cwd.to_str().unwrap()),
                 CancellationToken::new(),
+                None,
             )
             .await
             .unwrap();

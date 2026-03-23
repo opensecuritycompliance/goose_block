@@ -443,6 +443,7 @@ impl McpClientTrait for CodeExecutionClient {
         arguments: Option<JsonObject>,
         _working_dir: Option<&str>,
         _cancellation_token: CancellationToken,
+        _allowed_headers: Option<Vec<String>>,
     ) -> Result<CallToolResult, Error> {
         let result = match name {
             "list_functions" => self.handle_list_functions(session_id).await,
